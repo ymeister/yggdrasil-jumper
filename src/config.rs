@@ -42,6 +42,27 @@ pub struct ConfigInner {
     pub only_peers_advertising_jumper: bool,
     pub failed_yggdrasil_traversal_limit: Option<NonZero<u32>>,
 
+    pub wireguard: bool,
+    pub wireguard_skip_checks: bool,
+    #[serde(deserialize_with = "parse_duration")]
+    pub wireguard_query_delay: Duration,
+    #[serde(deserialize_with = "parse_duration")]
+    pub wireguard_negotiations_timeout: Duration,
+    pub wireguard_inactivity_timeout: u64,
+    pub wireguard_echo_start: u64,
+    pub wireguard_echo_count: u64,
+    #[serde(deserialize_with = "parse_duration")]
+    pub wireguard_echo_delay: Duration,
+    pub wireguard_shutdown_notification_count: u64,
+    #[serde(deserialize_with = "parse_duration")]
+    pub wireguard_shutdown_notification_delay: Duration,
+    pub wireguard_handshake_renew_timeout: u64,
+    pub wireguard_device_prefix: String,
+    pub wireguard_device_rounds: u32,
+    pub wireguard_yggdrasil_keepalive: bool,
+    #[serde(deserialize_with = "parse_duration")]
+    pub wireguard_yggdrasil_keepalive_interval: Duration,
+
     pub yggdrasil_dpi: bool,
     pub yggdrasil_dpi_udp_mtu: usize,
     pub yggdrasil_dpi_fallback_to_reliable: bool,
@@ -119,8 +140,30 @@ impl Default for ConfigInner {
             only_peers_advertising_jumper: false,
             failed_yggdrasil_traversal_limit: None,
 
+            wireguard: false,
+            wireguard_skip_checks: false,
+            wireguard_query_delay: Duration::from_secs(2),
+            // Time to initially wait, until connection is established
+            wireguard_negotiations_timeout: Duration::from_secs(6),
+            wireguard_inactivity_timeout: 70,
+            // Swiftly detect connectivity loss and fallback to yggdrasil router without
+            // introducing persistent keepalive traffic
+            wireguard_echo_start: 5,
+            wireguard_echo_count: 5,
+            wireguard_echo_delay: Duration::from_secs_f64(0.5),
+            // Wireguard renewal interval is 120s, but only if there's traffic
+            wireguard_handshake_renew_timeout: 180,
+            wireguard_shutdown_notification_count: 5,
+            wireguard_shutdown_notification_delay: Duration::from_secs_f64(0.3),
+            wireguard_device_prefix: "wg-jumper".into(),
+            wireguard_device_rounds: 1000,
+            // Keep yggdrasil session alive, while wireguard bridge is active
+            wireguard_yggdrasil_keepalive: false,
+            wireguard_yggdrasil_keepalive_interval: Duration::from_secs(30),
+
             yggdrasil_dpi: false,
-            yggdrasil_dpi_udp_mtu: 1452, // 1500 (baseline mtu) - 20 (ipv4) or 40 (ipv6) - 8 (udp)
+            // 1452 = 1500 (baseline mtu) - 20 (ipv4) or 40 (ipv6) - 8 (udp)
+            yggdrasil_dpi_udp_mtu: 1452,
             yggdrasil_dpi_fallback_to_reliable: true,
 
             yggdrasil_admin_reconnect: false,
@@ -133,7 +176,8 @@ impl Default for ConfigInner {
             peer_getnodeinfo_timeout: Duration::from_secs(10),
             session_cache_invalidation_timeout: Duration::from_secs(3 * 3600), // Chosen arbitrarily
 
-            align_uptime_timeout: 20.0, // Must be the same on both sides
+            // Must be the same on both sides
+            align_uptime_timeout: 20.0,
             inactivity_delay: 1.5 * 60.0,
             inactivity_delay_period: 5.0 * 60.0,
         }
@@ -145,7 +189,7 @@ impl ConfigInner {
         include_str!("../config.toml")
     }
 
-    pub fn read(path: &Path) -> Result<Self, ()> {
+    pub async fn read(path: &Path) -> Result<Self, ()> {
         let config = if path == Path::new("-") {
             let mut buf = String::new();
             std::io::Read::read_to_string(&mut std::io::stdin().lock(), &mut buf)
@@ -156,18 +200,30 @@ impl ConfigInner {
         };
         let config: Self =
             toml::from_str(config.as_str()).map_err(map_error!("Failed to parse config"))?;
-        config.verify()
+        config.verify().await
     }
 
-    fn verify(self) -> Result<Self, ()> {
+    async fn verify(self) -> Result<Self, ()> {
         if self.yggdrasil_admin_listen.is_empty() {
             error!("No yggdrasil admin socket specified");
             return Err(());
         }
+
         if !self.allow_ipv4 && !self.allow_ipv6 {
             error!("IPv4 and IPv6 connectivity disallowed by the configuration");
             return Err(());
         }
+
+        if self.wireguard && !self.wireguard_skip_checks {
+            #[cfg(target_os = "linux")]
+            crate::bridge_wireguard::verify().await?;
+            #[cfg(not(target_os = "linux"))]
+            {
+                error!("Wireguard not supported on this platform");
+                return Err(());
+            }
+        }
+
         Ok(self)
     }
 }

@@ -103,10 +103,9 @@ automatically reconnect if the yggdrasil router is restarted or yet to be
 started.
 
 - Whitelist the nodes jumper attempts to peer with: `whitelist = [ <ipv6
-address> ]`. The node address itself and any address in it's subnet are both
-accepted.
+address> ]`. The node address itself and any in it's subnet are accepted.
 
-- Only connect to nodes that are actively advertise jumper support: set
+- Only connect to nodes that advertise jumper support: set
 `only_peers_advertising_jumper = true` (default is false), along with
 `NodeInfo: { "jumper": true }` in the yggdrasil config file.
 
@@ -115,12 +114,65 @@ accepted.
 preserved between sessions for some time, and is reset if at least one
 traversal succeeds.
 
-- `yggdrasil_dpi` (highly experimental) - send network traffic over an
-unreliable channel, reducing latency under load. Currently yggdrasil router
-expects all communication between peers be conducted over a reliable channel.
-This includes all traffic over yggdrasil network, which effectively conceals
-packet loss and the real network bandwidth, leading to
-[bufferbloat][bufferbloat].
+- `wireguard = true` (default is false) - send all traffic between peers using
+wireguard, eliminating added latency even under load. Only supported on linux,
+and requires CAP_NET_ADMIN capability or root privileges. See [Bridging over
+WireGuard](#Bridging-over-WireGuard).
+
+- `wireguard_yggdrasil_keepalive` (default is false) - whether to keep
+yggdrasil session alive, while wireguard bridge is active.
+
+- `yggdrasil_dpi` (highly experimental, prefer wireguard if available) - send
+network traffic over an unreliable channel, reducing latency under network
+load. See [Yggdrasil DPI](#Yggdrasil-DPI).
+
+## Bridging over WireGuard
+
+[WireGuard][wireguard] is a simple p2p VPN implementation built directly into
+linux kernel. Here, p2p means that it itself only route traffic between the 2
+directly connected peers. That is exactly what we need to operate peerings,
+added some glue to manage wireguard interface and assign routing entries.
+
+[wireguard]: https://www.wireguard.com/
+
+The only complication is that wireguard's implementation in kernel doesn't
+support setting reuseaddr flag for it's UDP socket, so we can't directly use it
+for traversal, nor can we allow it to bind to a traversed port, already
+occupied by jumper, unless it would be the only peering we would be able to
+maintain. Alternatively jumper could proxy traffic, although this would defeat
+the purpose of keeping all userspace processes out of the hot path.
+
+Luckily, the linux's [netfilter][netfilter] is expressive enough to allow
+redirecting traffic destined for the certain address from a wireguard port via
+a port assigned to the traversal socket, while also keeping the latter open for
+any other traffic. This is configured using iptables(8) (postrouting chain of
+nat table). Although, since netfilter implements stateful connection tracking,
+it would continue routing traffic from the remote peer the to the traversal
+socket (not a wireguard one). Luckily again, netfilter allows to just flush
+certain firewall state associated with traversed connection.
+
+[netfilter]: https://netfilter.org/
+
+The effect of switching to wireguard is essentially no added link latency, even
+under load (both network wise and cpu wise), while simultaneously upholding the
+promise of the yggdrasil router to keep yggdrasil network traffic properly
+encrypted.
+
+> [!NOTE]
+> Using WireGuard requires the jumper process to have CAP_NET_ADMIN capability
+> or root privileges. And it currently needs the following packages installed:
+> iproute2, iptables, wireguard-tools, conntrack-tools (check
+> [Repology][repology] if your distro calls them differently). Though ideally,
+> jumper should interface directly with kernel using netlink instead.
+
+[repology]: https://repology.org/projects/
+
+## Yggdrasil DPI
+
+Currently yggdrasil router expects all communication between peers be conducted
+over a reliable channel. This includes all traffic over yggdrasil network,
+which effectively conceals packet loss and the real network bandwidth, leading
+to [bufferbloat][bufferbloat].
 
 [bufferbloat]: https://en.wikipedia.org/wiki/Bufferbloat
 
@@ -169,6 +221,35 @@ buffers.
 
 [fq_codel]: https://www.rfc-editor.org/rfc/rfc8290
 [network-scheduler]: https://en.wikipedia.org/wiki/Network_scheduler
+
+### Latency fluctuations with yggdrasil DPI
+
+While the approach of yggdrasil dpi is fine, at least in my configuration,
+there's an issue with TCP traffic. It's throughput is too low, compared to the
+bandwidth of the channel, and it experience too many retransmissions, as
+reported by iperf3.
+
+The overall throughput seems fine, since sending UDP traffic with fixed
+bandwidth (slightly lower than bandwidth of the underlying link), iperf3 report
+a minuscule packet loss of <0.1%. And while enabling the nodelay option on the
+yggdrasil TCP socket improves the situation, bandwidth of a TCP connection
+still falls short from full throughput of the underlying link.
+
+Playing with linux's tc-netem(7), I observed that a similar issue with TCP
+bandwidth exists if latency jitter is set too high. Which may be the cause of
+the problem. As we're proxying individual packets between 4 userspace processes
+(ygg -> jumper -> jumper -> ygg), this inevitably introduces fluctuations in
+processing time, as all these processes receive different execution window.
+Sending a bunch of packets down the link may, at times, convince a TCP
+connection, that latency variation is very low. Therefore it reduces the
+expected retransmission timeout, leading to spurious retransmissions, and when
+the next batch of packets arrives a bit late, sender already started
+retransmitting these packets. This process may oscillate at a high rate.
+
+Latency estimation fluctuations can be observed using ss utility from iproute2.
+And also, interestingly, artificially limiting the bandwidth of the yggdrasil
+router tun interface using tc-netem(7) ends up actually increasing the
+bandwidth of the TCP connection, as traffic is artificially spread over time.
 
 ## Details
 

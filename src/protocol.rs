@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::{
     net::{SocketAddr, SocketAddrV6},
+    ops::Not,
     time::Duration,
 };
 use tokio::{net::UdpSocket, select, time::sleep_until};
@@ -28,7 +29,17 @@ pub struct Header {
     pub server_available: Vec<PeeringProtocol>,
     /// Candidate external addresses. Only one per ipv4/6 is currently supported.
     pub candidates: Vec<SocketAddr>,
+
+    #[serde(default, skip_serializing_if = "Not::not")]
     pub yggdrasil_dpi: bool,
+
+    #[serde(default, skip_serializing_if = "Not::not")]
+    pub wireguard: bool,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct WgHeader {
+    pub pub_key: String,
 }
 
 /// Try to negotiate a traversal session. Socket must already be connected.
@@ -57,11 +68,12 @@ pub async fn try_session(
         server_available,
         candidates: mappings.iter().map(|m| m.external).collect(),
         yggdrasil_dpi: config.yggdrasil_dpi,
+        wireguard: config.wireguard,
     };
 
     let remote_header = utils::timeout(
         Duration::from_secs(10),
-        exchange_headers(&socket, &self_header),
+        exchange_struct(&socket, &self_header, 0),
     )
     .await
     .map_err(map_info!("Failed to exchange headers"))?;
@@ -129,6 +141,39 @@ pub async fn try_session(
         .map_err(map_debug!("NAT traversal failed"))?
         .map_err(map_debug!("NAT traversal unsuccessful"))?;
 
+    #[cfg(target_os = "linux")]
+    if self_header.wireguard && remote_header.wireguard {
+        use crate::bridge_wireguard;
+
+        let (pub_key, priv_key) = bridge_wireguard::wg_genkeys().await?;
+        let self_wg = WgHeader { pub_key };
+
+        let remote_wg = utils::timeout(
+            Duration::from_secs(10),
+            exchange_struct(&socket, &self_wg, 1),
+        )
+        .await
+        .map_err(map_info!("Failed to exchange wireguard headers"))?;
+
+        if !bridge_wireguard::verify_pub_key(remote_wg.pub_key.as_bytes()) {
+            info!("Remote pub key is malformed: {:?}", remote_wg.pub_key);
+            return Err(());
+        }
+
+        let params = bridge_wireguard::WgBridgeParams {
+            local_addr: local,
+            peer_addr: remote_cand,
+            monitor_address: *peer_addr.ip(),
+            peer_pub: remote_wg.pub_key,
+            self_priv: priv_key,
+            local_ygg_addr: state.router.read().await.address,
+            yggdrasil_socket: socket,
+            inet_socket: inet_sock,
+        };
+
+        return bridge_wireguard::start_bridge(config, state, params).await;
+    }
+
     let yggdrasil_dpi = self_header.yggdrasil_dpi && remote_header.yggdrasil_dpi;
 
     let direction = if yggdrasil_dpi {
@@ -155,16 +200,20 @@ pub async fn try_session(
     bridge::start_bridge(config, state, inet_sock, params).await
 }
 
-/// Classic stop-and-wait ARQ without a packet count. Timeout should be provided externally.
-async fn exchange_headers(socket: &UdpSocket, header: &Header) -> IoResult<Header> {
+/// Classic stop-and-wait ARQ. Timeout should be provided externally.
+/// `sequence` number must match on both sides.
+pub async fn exchange_struct<T>(socket: &UdpSocket, data: &T, sequence: u16) -> IoResult<T>
+where
+    T: for<'a> Serialize + for<'a> Deserialize<'a>,
+{
     let rto = Duration::from_millis(400);
 
     let mut ack = Vec::new();
     ack.extend(JUMPER_PREFIX);
-    ack.extend(&[0, 0]);
+    ack.extend(sequence.to_le_bytes());
 
     let mut header_buf = ack.clone();
-    serde_json::to_writer(&mut header_buf, header).expect("Can't serialize header");
+    serde_json::to_writer(&mut header_buf, data).expect("Can't serialize header");
 
     let mut remote_header = None;
     let mut got_ack = false;
@@ -184,12 +233,15 @@ async fn exchange_headers(socket: &UdpSocket, header: &Header) -> IoResult<Heade
             _ = sleep_until(next_rto), if !got_ack => {
                 debug!("Sending header");
                 socket.send(&header_buf).await?;
-                next_rto = tokio::time::Instant::now().checked_add(rto).unwrap();
+                next_rto = tokio::time::Instant::now() + rto;
                 continue;
             },
         };
         let buf = &buf[..res?];
-        debug!("Recv: {:?}", String::from_utf8_lossy(buf));
+        debug!(
+            "Recv: {:?}...",
+            String::from_utf8_lossy(&buf[..buf.len().min(8)])
+        );
 
         if !buf.starts_with(&ack) {
             debug!("Receipt doesn't look like a header");
@@ -199,7 +251,7 @@ async fn exchange_headers(socket: &UdpSocket, header: &Header) -> IoResult<Heade
         if buf == ack {
             got_ack = true;
         } else {
-            remote_header = Some(serde_json::from_slice::<Header>(&buf[ack.len()..])?);
+            remote_header = Some(serde_json::from_slice::<T>(&buf[ack.len()..])?);
             socket.send(&ack).await?;
         }
 

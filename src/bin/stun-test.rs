@@ -120,7 +120,7 @@ async fn start() -> Result<(), ()> {
 
     // Load config
     let config = Arc::new(match cli_args.config {
-        Some(ref path) => config::ConfigInner::read(path.as_path())?,
+        Some(ref path) => config::ConfigInner::read(path.as_path()).await?,
         None => config::ConfigInner::default(),
     });
 

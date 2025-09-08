@@ -11,6 +11,8 @@ use yggdrasilctl::{PeerEntry, SessionEntry};
 
 pub mod admin_api;
 pub mod bridge;
+#[cfg(target_os = "linux")]
+pub mod bridge_wireguard;
 pub mod config;
 pub mod network;
 pub mod protocol;

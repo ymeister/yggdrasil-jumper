@@ -171,7 +171,7 @@ pub async fn lookup_external_address(
     let mut is_idle = true; // Whether we not got a reply
     let mut decoder = MessageDecoder::<Attribute>::new();
     'resend: for timeout in timeout {
-        let timeout = tokio::time::Instant::now().checked_add(timeout).unwrap();
+        let timeout = tokio::time::Instant::now() + timeout;
 
         tokio::select! {
             res = socket.write_all(&request[..]) => res,

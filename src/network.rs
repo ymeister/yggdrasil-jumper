@@ -284,7 +284,10 @@ pub async fn traverse_udp(
                     Ok(read) => &buf[..read],
                 };
 
-                debug!("Recv {:?}", String::from_utf8_lossy(buf));
+                debug!(
+                    "Recv: {:?}...",
+                    String::from_utf8_lossy(&buf[..buf.len().min(8)])
+                );
 
                 if buf.starts_with(JUMPER_PREFIX) {
                     // Peer already passed traversal stage
@@ -334,7 +337,7 @@ pub async fn traverse_udp(
 
         match message {
             MessageClass::Request if !send_ack => {
-                counter += params.retry_count / 2;
+                counter += params.retry_count / 4;
                 send_ack = true;
             }
             MessageClass::SuccessResponse if !got_remote_ack => {

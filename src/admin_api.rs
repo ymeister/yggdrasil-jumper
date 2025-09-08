@@ -10,6 +10,7 @@ pub struct RouterState {
     pub server_available: Vec<PeeringProtocol>,
     pub version: RouterVersion,
     pub address: Ipv6Addr,
+    pub tun_name: Option<String>,
     pub admin_api: Endpoint<Box<dyn utils::RwStream>>,
 }
 
@@ -21,12 +22,14 @@ async fn connect_endpoint(
     info!("Connected to {uri}");
     let mut endpoint = Endpoint::attach(socket).await;
 
+    let err_query = map_error!("Failed to query admin api response");
+
     // Check router info
     let version = endpoint.get_version();
     let info = endpoint
         .get_self()
         .await
-        .map_err(map_error!("Failed to query admin api response"))?
+        .map_err(err_query)?
         .map_err(map_error!("Command 'getself' failed"))?;
 
     // If router version is lower then v0.4.5
@@ -76,6 +79,7 @@ async fn connect_endpoint(
         .cloned()
         .filter(|prot| prot.is_supported_by_router(&version))
         .collect();
+
     let server_available: Vec<_> = enabled_protocols
         .iter()
         .cloned()
@@ -87,11 +91,27 @@ async fn connect_endpoint(
         })
         .collect();
 
+    let tun_info = endpoint
+        .get_tun()
+        .await
+        .map_err(err_query)?
+        .map_err(map_error!("Command 'gettun' failed"))?;
+
+    if !tun_info.enabled {
+        warn!("Yggdrasil router TUN interface is disabled");
+        return Err(());
+    }
+
+    if tun_info.name.is_none() && config.wireguard && config.wireguard_yggdrasil_keepalive {
+        warn!("Can't get TUN interface name of yggdrasil router for wireguard keepalive to work");
+    }
+
     Ok(RouterState {
         supported_protocols: enabled_protocols,
         server_available,
         version,
         address: info.address,
+        tun_name: tun_info.name,
         admin_api: endpoint,
     })
 }

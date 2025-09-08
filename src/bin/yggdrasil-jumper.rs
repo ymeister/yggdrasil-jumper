@@ -7,7 +7,7 @@ use tokio::{
 use tracing::{error, info, level_filters::LevelFilter};
 
 use yggdrasil_jumper::{
-    admin_api, config, network, session, stun, utils, SilentResult, State, StateInner,
+    admin_api, config, network, session, stun, utils, Config, SilentResult, State, StateInner,
 };
 
 #[derive(Debug, clap::Parser)]
@@ -65,7 +65,7 @@ pub async fn start(cancellation: utils::PassiveCancellationToken) -> SilentResul
 
     // Read config file
     let config = match &cli_args.config {
-        Some(path) => config::ConfigInner::read(path)?,
+        Some(path) => config::ConfigInner::read(path).await?,
         None => config::ConfigInner::default(),
     };
     let config = Arc::new(config);
@@ -106,8 +106,9 @@ pub async fn start(cancellation: utils::PassiveCancellationToken) -> SilentResul
     let (locals, mut inet_listeners) =
         network::setup_inet_listeners(config.clone(), state.clone())?;
 
-    #[cfg(debug_assertions)]
-    spawn(debug_sanity_checker(state.clone()));
+    if cfg!(debug_assertions) {
+        spawn(debug_sanity_checker(config.clone(), state.clone()));
+    }
 
     // Spawn & wait
     select! {
@@ -190,8 +191,7 @@ fn signal_harness() -> JoinSet<()> {
     signals
 }
 
-#[cfg(debug_assertions)]
-async fn debug_sanity_checker(state: State) {
+async fn debug_sanity_checker(config: Config, state: State) {
     use tracing::warn;
     loop {
         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
@@ -200,7 +200,7 @@ async fn debug_sanity_checker(state: State) {
             continue;
         }
 
-        if !state.active_sessions.read().await.is_empty() {
+        if !state.active_sessions.read().await.is_empty() && !config.wireguard {
             warn!("Some sessions are lingering");
         }
 

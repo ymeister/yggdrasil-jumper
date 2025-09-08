@@ -1,4 +1,5 @@
-use std::{io::ErrorKind, sync::Arc};
+use socket2::SockRef;
+use std::{io::ErrorKind, net::Shutdown, sync::Arc};
 use tokio::net::UdpSocket;
 use tracing::{debug, debug_span};
 
@@ -29,16 +30,8 @@ pub async fn setup_proxy_udp(
         Box::new(utils::defer_async({
             async move {
                 debug!("Dropping proxy");
-                // Std UdpSocket doesn't have a shutdown option, and just .set_read_timeout()
-                // doesn't work reliably, so...
-                term_tx.closed().await;
-                let shutdown = |sock: &std::net::UdpSocket| {
-                    sock.connect(sock.local_addr().unwrap()).unwrap();
-                    sock.send(&[0]).unwrap();
-                };
-
-                shutdown(&ygg);
-                shutdown(&peer);
+                let _ = SockRef::from(&ygg).shutdown(Shutdown::Both);
+                let _ = SockRef::from(&peer).shutdown(Shutdown::Both);
             }
         })),
     ))
@@ -69,6 +62,7 @@ async fn setup_proxy(
                 });
                 let _span = debug_span!("", direction);
                 let _span = _span.enter();
+
                 let mut buf = Box::new([0u8; BUF_SIZE]);
                 loop {
                     let read = match from.recv(&mut buf[..]) {
@@ -81,11 +75,14 @@ async fn setup_proxy(
                             break;
                         }
                     };
+
                     if term_tx.is_closed() {
                         break;
                     }
+
                     debug!("Forwarding {read} bytes");
                     match to.send(&buf[..read]) {
+                        Ok(n) if n != read => debug!("Sent {n} bytes instead of {read}"),
                         Ok(_) => {}
                         Err(err) if err.kind() == ErrorKind::Interrupted => continue,
                         Err(err) => {

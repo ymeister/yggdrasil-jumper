@@ -16,7 +16,8 @@ pub async fn timeout<T>(
 /// Exponential timeout of base 2.
 ///
 /// Upholds property, that max total time equals retry time (t) * cycle count (n):
-///     total_time = t * n = t1 + t2 + ... + t_n = t0 * (1 + 2 + 4 + ... + 2^(n-1))
+///   - total_time = t * n = t1 + t2 + ... + t_n = t0 * (1 + 2 + 4 + ... + 2^(n-1))
+///   - first_timeout = t * n / (2^n - 1)
 pub struct Timeout {
     /// t_0 = t * n / (2^n - 1)
     t0: Duration,
@@ -29,10 +30,7 @@ pub struct Timeout {
 impl Timeout {
     pub fn new_exponential(retry_time: Duration, cycle_count: u32) -> Self {
         Timeout {
-            t0: retry_time
-                .checked_mul(cycle_count)
-                .unwrap()
-                .div_f64(2f64.powf(cycle_count as f64) - 1f64),
+            t0: (retry_time * cycle_count).div_f64(2f64.powf(cycle_count as f64) - 1f64),
             cycles_left: cycle_count,
             next_scale: Some(1f32),
         }

@@ -1,4 +1,5 @@
 use kcp::Error as KcpError;
+use socket2::SockRef;
 use std::{
     io::{ErrorKind, Read, Write},
     net::Shutdown,
@@ -10,7 +11,8 @@ use tokio::net::{TcpStream, UdpSocket};
 use tracing::{debug, debug_span};
 
 use crate::{
-    bridge::BridgeParams, map_warn, utils, yggdrasil_dpi, Config, IoResult, SilentResult, State,
+    bridge::BridgeParams, map_info, map_warn, utils, yggdrasil_dpi, Config, IoResult, SilentResult,
+    State,
 };
 
 const STACK_SIZE: usize = 128 * 1024;
@@ -46,6 +48,10 @@ pub async fn setup_proxy_tcp(
     let ygg = utils::into_std_tcp_socket(ygg)?;
     let peer = Arc::new(utils::into_std_udp_socket(peer)?);
 
+    let _ = ygg
+        .set_nodelay(true)
+        .map_err(map_warn!("Error enabling nodelay"));
+
     let time_now = {
         let start = Instant::now();
         move || start.elapsed().as_millis().bitand(u32::MAX as u128) as u32
@@ -80,8 +86,8 @@ pub async fn setup_proxy_tcp(
     let (term_tx, term_rx) = tokio::sync::mpsc::channel::<()>(1);
 
     let err_kcp_sending = map_warn!("Error sending to kcp");
-    let err_sending = map_warn!("Error sending");
-    let err_writing = map_warn!("Error writing");
+    let err_sending = map_info!("Error sending");
+    let err_writing = map_info!("Error writing");
     let err_set_timeout = map_warn!("Error setting read timeout");
     let err_dup = map_warn!("Error duplicating socket");
     let err_spawn_thread = map_warn!("Error spawning new thread");
@@ -113,6 +119,7 @@ pub async fn setup_proxy_tcp(
                 let _span = _span.enter();
                 let mut buf = Box::new([0u8; BUF_SIZE]);
                 let mut left = 0;
+
                 let mut send_lossy = yggdrasil_dpi::SendLossy {
                     udp_mtu,
                     fallback_to_reliable,
@@ -352,12 +359,7 @@ pub async fn setup_proxy_tcp(
             async move {
                 debug!("Dropping proxy");
                 let _ = ygg.shutdown(Shutdown::Both);
-
-                // Std UdpSocket doesn't have a shutdown option, and just .set_read_timeout()
-                // doesn't work reliably, so...
-                term_tx.closed().await;
-                peer.connect(peer.local_addr().unwrap()).unwrap();
-                peer.send(&[0]).unwrap();
+                let _ = SockRef::from(&peer).shutdown(Shutdown::Both);
             }
         })),
     ))

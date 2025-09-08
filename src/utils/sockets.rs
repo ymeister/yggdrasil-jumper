@@ -103,7 +103,7 @@ pub fn create_udp_socket_in_domain(domain: &SocketAddr, port: u16) -> SilentResu
     }
 }
 
-/// NOTE: Unconnected UDP socket steals all traffic from the global listener
+/// NOTE: Unconnected UDP socket steals all incoming traffic from the global listener
 pub fn create_udp_socket(bind_to: SocketAddr) -> SilentResult<UdpSocket> {
     let map_err = map_error!("Failed to crate socket");
 
